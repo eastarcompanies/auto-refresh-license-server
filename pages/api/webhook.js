@@ -1,71 +1,60 @@
 import Stripe from "stripe";
-import { kv } from "@vercel/kv";
-import { getRawBody } from "../../lib/buffer";
-import { makeLicenseKey } from "../../lib/license";
 
 export const config = {
-  api: { bodyParser: false }
+  api: {
+    bodyParser: false, // required for Stripe signature verification
+  },
 };
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = new Stripe(process.env.whsec_opDbod7eI1vLTCAlftPhGbdNmv5uBRND, {
+  apiVersion: "2023-08-16",
+});
 
-async function markSubscriptionInactive(subscriptionId) {
-  if (!subscriptionId) return;
-  const licenseKey = await kv.get(`sub:${subscriptionId}`);
-  if (!licenseKey) return;
-  await kv.set(`license:${licenseKey}`, JSON.stringify({ status: "inactive", subscriptionId }));
+async function readRawBody(req) {
+  return await new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method not allowed");
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).send("Method Not Allowed");
+  }
 
   const sig = req.headers["stripe-signature"];
-  if (!sig) return res.status(400).send("Missing stripe-signature");
+  const rawBody = await readRawBody(req);
 
   let event;
   try {
-    const rawBody = await getRawBody(req);
-    event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (e) {
-    return res.status(400).send("Webhook error");
+    event = stripe.webhooks.constructEvent(
+      rawBody,
+      sig,
+      process.env.whsec_opDbod7eI1vLTCAlftPhGbdNmv5uBRND
+    );
+  } catch (err) {
+    console.log("Webhook signature verification failed:", err.message);
+    return res.status(400).json({ ok: false, error: "bad_signature" });
   }
 
   try {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      const existing = await kv.get(`session:${session.id}`);
-      if (existing) return res.status(200).json({ ok: true });
+      // This is where you generate/save a license
+      console.log("PAYMENT OK session:", session.id);
+      console.log("EMAIL:", session.customer_details?.email);
 
-      const licenseKey = makeLicenseKey("ARP");
-
-      const subscriptionId = session.subscription || null;
-      const customerId = session.customer || null;
-
-      await kv.set(`session:${session.id}`, licenseKey);
-      await kv.set(
-        `license:${licenseKey}`,
-        JSON.stringify({
-          status: "active",
-          createdAt: Date.now(),
-          sessionId: session.id,
-          customerId,
-          subscriptionId
-        })
-      );
-
-      if (subscriptionId) {
-        await kv.set(`sub:${subscriptionId}`, licenseKey);
-      }
-    }
-
-    if (event.type === "customer.subscription.deleted") {
-      const sub = event.data.object;
-      await markSubscriptionInactive(sub.id);
+      // optional: call your license creator endpoint here
+      // or directly generate a key and store it somewhere
     }
 
     return res.status(200).json({ ok: true });
-  } catch (e) {
+  } catch (err) {
+    console.log("Webhook handler error:", err.message);
     return res.status(500).json({ ok: false });
   }
 }
